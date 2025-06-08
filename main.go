@@ -6,11 +6,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
-	"github.com/repo-scm/git/mount"
+	git "github.com/repo-scm/git/mount"
 )
 
 var (
@@ -61,28 +62,52 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	remoteRepo, localRepo := mount.ParsePath(ctx, manifestFile)
-
 	if unmountPath != "" {
-		if err := mount.UnmountOverlay(ctx, localRepo, unmountPath); err != nil {
-			return errors.Wrap(err, "failed to unmount overlay\n")
-		}
-		if remoteRepo != "" {
-			if err := mount.UnmountSshfs(ctx, localRepo); err != nil {
-				return errors.Wrap(err, "failed to unmount sshfs\n")
-			}
+		if err := unmount(ctx, unmountPath); err != nil {
+			return errors.Wrap(err, "failed to unmount repo\n")
 		}
 		return nil
 	}
 
-	if remoteRepo != "" {
-		if err := mount.MountSshfs(ctx, sshkeyFile, remoteRepo, localRepo); err != nil {
+	if err := mount(ctx, mountPath); err != nil {
+		return errors.Wrap(err, "failed to mount repo\n")
+	}
+
+	return nil
+}
+
+func mount(ctx context.Context, root string) error {
+	remoteManifest, localManifest := git.ParsePath(ctx, manifestFile)
+
+	local := path.Dir(path.Clean(localManifest))
+
+	if remoteManifest != "" {
+		remote := path.Dir(path.Clean(remoteManifest))
+		if err := git.MountSshfs(ctx, sshkeyFile, remote, local); err != nil {
 			return errors.Wrap(err, "failed to mount sshfs\n")
 		}
 	}
 
-	if err := mount.MountOverlay(ctx, localRepo, mountPath); err != nil {
+	if err := git.MountOverlay(ctx, local, root); err != nil {
 		return errors.Wrap(err, "failed to mount overlay\n")
+	}
+
+	return nil
+}
+
+func unmount(ctx context.Context, root string) error {
+	remoteManifest, localManifest := git.ParsePath(ctx, manifestFile)
+
+	local := path.Dir(path.Clean(localManifest))
+
+	if err := git.UnmountOverlay(ctx, local, root); err != nil {
+		return errors.Wrap(err, "failed to unmount overlay\n")
+	}
+
+	if remoteManifest != "" {
+		if err := git.UnmountSshfs(ctx, local); err != nil {
+			return errors.Wrap(err, "failed to unmount sshfs\n")
+		}
 	}
 
 	return nil
