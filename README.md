@@ -22,6 +22,16 @@ repo with copy-on-write
 ## Usage
 
 ```
+Usage:
+  repo [flags]
+
+Flags:
+  -h, --help              help for repo
+  -n, --manifest string   manifest file (user@host:/remote/manifest.xml:/local/manifest.xml)
+  -m, --mount string      mount path
+  -s, --sshkey string     sshkey file (/path/to/id_rsa)
+  -u, --unmount string    unmount path
+  -v, --version           version for repo
 ```
 
 
@@ -30,19 +40,32 @@ repo with copy-on-write
 
 ### 1. Overlay
 
+#### Preparation
+
+```bash
+cd /path/to/aosp
+
+export REPO_URL='https://mirrors.tuna.tsinghua.edu.cn/git/git-repo'
+export AOSP_MANIFEST='https://github.com/repo-scm/manifest'
+
+repo init --partial-clone -b main -u $AOSP_MANIFEST --manifest-depth=1 -c --depth=1 -b main
+repo sync -c -j4 --fail-fast
+repo manifest -o manifest.xml
+```
+
 #### Mount
 
 ```bash
-sudo ./repo --mount /mnt/overlay/repo --repository /path/to/repo
+sudo ./repo --mount /mnt/overlay/aosp --manifest /path/to/aosp/manifest.xml
 
-sudo chown -R $USER:$USER /mnt/overlay/repo
-sudo chown -R $USER:$USER /path/to/cow-repo
+sudo chown -R $USER:$USER /mnt/overlay/aosp
+sudo chown -R $USER:$USER /path/to/cow-aosp
 ```
 
 #### Test
 
 ```bash
-cd /mnt/overlay/repo
+cd /mnt/overlay/aosp/system/core
 
 echo "new file" | tee newfile.txt
 echo "modified" | tee README.md
@@ -54,7 +77,7 @@ git push origin main
 #### Unmount
 
 ```bash
-sudo ./repo --unmount /mnt/overlay/repo --repository /path/to/repo
+sudo ./repo --unmount /mnt/overlay/aosp --manifest /path/to/aosp/manifest.xml
 ```
 
 #### Screenshot
@@ -62,6 +85,21 @@ sudo ./repo --unmount /mnt/overlay/repo --repository /path/to/repo
 ![overlay](overlay.png)
 
 ### 2. SSHFS and Overlay
+
+#### Preparation
+
+```bash
+ssh user@host:/remote/aosp
+
+export REPO_URL='https://mirrors.tuna.tsinghua.edu.cn/git/git-repo'
+export AOSP_MANIFEST='https://github.com/repo-scm/manifest'
+
+repo init --partial-clone -b main -u $AOSP_MANIFEST --manifest-depth=1 -c --depth=1 -b main
+repo sync -c -j4 --fail-fast
+repo manifest -o manifest.xml
+
+exit
+```
 
 #### Config
 
@@ -80,16 +118,16 @@ Host *
 #### Mount
 
 ```bash
-sudo ./repo --mount /mnt/overlay/repo --repository user@host:/remote/repo:/local/repo --sshkey /path/to/id_rsa
+sudo ./repo --mount /mnt/overlay/aosp --manifest user@host:/remote/aosp/manifest.xml:/local/manifest.xml --sshkey /path/to/id_rsa
 
-sudo chown -R $USER:$USER /mnt/overlay/repo
-sudo chown -R $USER:$USER /path/to/cow-repo
+sudo chown -R $USER:$USER /mnt/overlay/aosp
+sudo chown -R $USER:$USER /path/to/cow-aosp
 ```
 
 #### Test
 
 ```bash
-cd /mnt/overlay/repo
+cd /mnt/overlay/aosp/system/core
 
 echo "new file" | tee newfile.txt
 echo "modified" | tee README.md
@@ -101,7 +139,7 @@ git push origin main
 #### Unmount
 
 ```bash
-sudo ./repo --unmount /mnt/overlay/repo --repository /local/repo
+sudo ./repo --unmount /mnt/overlay/aosp --manifest /local/manifest.xml
 ```
 
 #### Screenshot
@@ -118,6 +156,4 @@ Project License can be found [here](LICENSE).
 
 ## Reference
 
-- [cloud-native-build](https://docs.cnb.cool/zh/)
-- [git-clone-yyds](https://cloud.tencent.com/developer/article/2456809)
-- [git-clone-yyds](https://cnb.cool/cnb/cool/git-clone-yyds)
+- [google-aosp](https://gist.github.com/craftslab/72bf50a05d047edff95dc2e13992c8b8)
