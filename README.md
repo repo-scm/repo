@@ -9,7 +9,7 @@
 
 ## Introduction
 
-repo with copy-on-write
+repo workspace with copy-on-write
 
 
 
