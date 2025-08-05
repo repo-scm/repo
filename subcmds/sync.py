@@ -903,7 +903,7 @@ later is required to fix a server side protocol bug.
         """Interactive selection of projects when overlay and interactive mode are enabled.
 
         Shows a command line interface for users to select multiple projects
-        from the manifest for synchronization with performance optimizations.
+        from the manifest for synchronization.
 
         Args:
             all_projects: List of all available projects from the manifest.
@@ -915,13 +915,13 @@ later is required to fix a server side protocol bug.
             print("No projects found in manifest.")
             return all_projects
 
-        # Performance optimization: Load cached selection if available
+        # Load cached selection if available
         cache_file = os.path.join(self.outer_client.manifest.repodir, "overlay_cache.json")
         cached_selection = self._LoadCachedSelection(cache_file, all_projects)
 
         # Quick analysis of project states for better performance
         print("\n" + "="*60)
-        print("INTERACTIVE PROJECT SELECTION (Performance Mode)")
+        print("INTERACTIVE PROJECT SELECTION")
         print("="*60)
 
         # Categorize projects for faster processing
