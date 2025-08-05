@@ -576,6 +576,19 @@ later is required to fix a server side protocol bug.
             "locally",
         )
         p.add_option(
+            "--use-overlay",
+            action="store_true",
+            default=False,
+            help="use overlay mode for project synchronization with interactive selection",
+        )
+        p.add_option(
+            "--overlay-auto",
+            choices=["new", "outdated", "all", "cached"],
+            metavar="MODE",
+            help="auto-select projects in overlay mode: 'new' (new projects only), "
+            "'outdated' (new + outdated), 'all' (all projects), 'cached' (use cached selection)",
+        )
+        p.add_option(
             "--retry-fetches",
             default=0,
             action="store",
@@ -885,6 +898,395 @@ later is required to fix a server side protocol bug.
         # connections are pending and execeeded the socket listening backlog,
         # especially on MacOS.
         len(cls.get_parallel_context()["sync_dict"])
+
+    def _InteractiveProjectSelection(self, all_projects):
+        """Interactive selection of projects when overlay and interactive mode are enabled.
+
+        Shows a command line interface for users to select multiple projects
+        from the manifest for synchronization with performance optimizations.
+
+        Args:
+            all_projects: List of all available projects from the manifest.
+
+        Returns:
+            List of selected projects to sync.
+        """
+        if not all_projects:
+            print("No projects found in manifest.")
+            return all_projects
+
+        # Performance optimization: Load cached selection if available
+        cache_file = os.path.join(self.outer_client.manifest.repodir, "overlay_cache.json")
+        cached_selection = self._LoadCachedSelection(cache_file, all_projects)
+
+        # Quick analysis of project states for better performance
+        print("\n" + "="*60)
+        print("INTERACTIVE PROJECT SELECTION (Performance Mode)")
+        print("="*60)
+
+        # Categorize projects for faster processing
+        new_projects = []
+        outdated_projects = []
+        uptodate_projects = []
+
+        print("Analyzing project states... ", end="", flush=True)
+        for project in all_projects:
+            if not project.Exists:
+                new_projects.append(project)
+            elif self._IsProjectOutdated(project):
+                outdated_projects.append(project)
+            else:
+                uptodate_projects.append(project)
+        print("Done!")
+
+        print(f"Found {len(all_projects)} total projects:")
+        print(f"  - {len(new_projects)} new projects")
+        print(f"  - {len(outdated_projects)} outdated projects")
+        print(f"  - {len(uptodate_projects)} up-to-date projects")
+
+        # Handle automatic mode if specified
+        if hasattr(self, '_overlay_auto_mode') and self._overlay_auto_mode:
+            return self._HandleAutoMode(self._overlay_auto_mode, all_projects, new_projects,
+                                      outdated_projects, uptodate_projects, cached_selection, cache_file)
+
+        # Offer quick selection options
+        if cached_selection:
+            print(f"\nFound cached selection with {len(cached_selection)} projects.")
+            use_cache = input("Use cached selection? [Y/n]: ").strip().lower()
+            if use_cache in ['', 'y', 'yes']:
+                # Validate cached projects still exist in manifest
+                valid_cached = [p for p in all_projects if p.name in cached_selection]
+                if valid_cached:
+                    print(f"Using {len(valid_cached)} cached projects.")
+                    return valid_cached
+                else:
+                    print("Cached selection is no longer valid.")
+
+        # Quick selection options
+        print("\nQuick selection options:")
+        print("  1. Sync only new projects")
+        print("  2. Sync new + outdated projects (recommended)")
+        print("  3. Sync all projects")
+        print("  4. Custom selection")
+        print("  5. Skip sync")
+
+        if cached_selection:
+            print("  6. Use cached selection")
+
+        while True:
+            try:
+                choice = input("\nSelect option (1-5): ").strip()
+
+                if choice == "1":
+                    selected_projects = new_projects
+                    break
+                elif choice == "2":
+                    selected_projects = new_projects + outdated_projects
+                    break
+                elif choice == "3":
+                    selected_projects = all_projects
+                    break
+                elif choice == "4":
+                    selected_projects = self._CustomProjectSelection(all_projects, new_projects, outdated_projects, uptodate_projects)
+                    break
+                elif choice == "5":
+                    print("No projects selected. Exiting sync.")
+                    return []
+                elif choice == "6" and cached_selection:
+                    valid_cached = [p for p in all_projects if p.name in cached_selection]
+                    selected_projects = valid_cached
+                    break
+                else:
+                    print("Invalid choice. Please try again.")
+                    continue
+
+            except KeyboardInterrupt:
+                print("\n\nSync cancelled by user.")
+                return []
+            except EOFError:
+                print("\n\nSync cancelled.")
+                return []
+
+        if selected_projects:
+            print(f"\nSelected {len(selected_projects)} project(s):")
+            if len(selected_projects) <= 10:
+                for project in selected_projects:
+                    status = "new" if project in new_projects else "outdated" if project in outdated_projects else "up-to-date"
+                    print(f"  - {project.name} ({project.relpath}) [{status}]")
+            else:
+                print(f"  - {len([p for p in selected_projects if p in new_projects])} new projects")
+                print(f"  - {len([p for p in selected_projects if p in outdated_projects])} outdated projects")
+                print(f"  - {len([p for p in selected_projects if p in uptodate_projects])} up-to-date projects")
+
+            # Cache the selection for future use
+            project_names = [p.name for p in selected_projects]
+            self._SaveCachedSelection(cache_file, project_names)
+
+        return selected_projects
+
+    def _ParseProjectSelection(self, selection, max_projects):
+        """Parse user selection string into list of project indices.
+
+        Args:
+            selection: User input string (e.g., "1 3 5-8 10")
+            max_projects: Maximum number of projects available
+
+        Returns:
+            List of selected project indices (1-based)
+        """
+        selected = set()
+
+        for part in selection.split():
+            if '-' in part:
+                # Handle ranges like "5-8"
+                try:
+                    start, end = part.split('-', 1)
+                    start_idx = int(start.strip())
+                    end_idx = int(end.strip())
+
+                    if start_idx < 1 or end_idx > max_projects or start_idx > end_idx:
+                        return []
+
+                    selected.update(range(start_idx, end_idx + 1))
+                except ValueError:
+                    return []
+            else:
+                # Handle individual numbers
+                try:
+                    idx = int(part.strip())
+                    if idx < 1 or idx > max_projects:
+                        return []
+                    selected.add(idx)
+                except ValueError:
+                    return []
+
+        return sorted(list(selected))
+
+    def _LoadCachedSelection(self, cache_file, all_projects):
+        """Load cached project selection from file.
+
+        Args:
+            cache_file: Path to cache file
+            all_projects: List of all available projects
+
+        Returns:
+            Set of cached project names, or None if cache is invalid/missing
+        """
+        try:
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r') as f:
+                    cache_data = json.load(f)
+
+                # Validate cache age (expire after 7 days)
+                cache_age = time.time() - cache_data.get('timestamp', 0)
+                if cache_age > 7 * 24 * 3600:  # 7 days
+                    return None
+
+                cached_names = set(cache_data.get('projects', []))
+                available_names = {p.name for p in all_projects}
+
+                # Return cached names that still exist in manifest
+                valid_cached = cached_names.intersection(available_names)
+                return valid_cached if valid_cached else None
+        except (json.JSONDecodeError, KeyError, OSError):
+            pass
+        return None
+
+    def _SaveCachedSelection(self, cache_file, project_names):
+        """Save project selection to cache file.
+
+        Args:
+            cache_file: Path to cache file
+            project_names: List of project names to cache
+        """
+        try:
+            cache_data = {
+                'timestamp': time.time(),
+                'projects': project_names
+            }
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+        except OSError:
+            pass  # Silently fail if we can't write cache
+
+    def _IsProjectOutdated(self, project):
+        """Check if a project needs updating (simplified fast check).
+
+        Args:
+            project: Project to check
+
+        Returns:
+            True if project appears to need updating
+        """
+        if not project.Exists:
+            return True
+
+        try:
+            # Quick check: if remote tracking branch is behind
+            current_branch = project.CurrentBranch
+            if current_branch:
+                # This is a simplified check - in reality you might want more sophisticated logic
+                gitdir = project.gitdir
+                if os.path.exists(gitdir):
+                    # Check if .git/FETCH_HEAD exists and is recent (last 24 hours)
+                    fetch_head = os.path.join(gitdir, 'FETCH_HEAD')
+                    if os.path.exists(fetch_head):
+                        fetch_time = os.path.getmtime(fetch_head)
+                        if time.time() - fetch_time > 24 * 3600:  # 24 hours
+                            return True
+                    else:
+                        return True  # Never fetched
+            return False
+        except:
+            return True  # If we can't determine, assume outdated
+
+    def _HandleAutoMode(self, auto_mode, all_projects, new_projects, outdated_projects, uptodate_projects, cached_selection, cache_file):
+        """Handle automatic project selection based on specified mode.
+
+        Args:
+            auto_mode: The automatic selection mode ('new', 'outdated', 'all', 'cached')
+            all_projects: List of all available projects
+            new_projects: List of new projects
+            outdated_projects: List of outdated projects
+            uptodate_projects: List of up-to-date projects
+            cached_selection: Set of cached project names
+            cache_file: Path to cache file
+
+        Returns:
+            List of selected projects
+        """
+        print(f"\nAutomatic mode: {auto_mode}")
+
+        if auto_mode == "new":
+            selected_projects = new_projects
+            print(f"Auto-selected {len(selected_projects)} new projects.")
+        elif auto_mode == "outdated":
+            selected_projects = new_projects + outdated_projects
+            print(f"Auto-selected {len(selected_projects)} projects (new + outdated).")
+        elif auto_mode == "all":
+            selected_projects = all_projects
+            print(f"Auto-selected all {len(selected_projects)} projects.")
+        elif auto_mode == "cached":
+            if cached_selection:
+                valid_cached = [p for p in all_projects if p.name in cached_selection]
+                if valid_cached:
+                    selected_projects = valid_cached
+                    print(f"Auto-selected {len(selected_projects)} cached projects.")
+                else:
+                    print("Cached selection is no longer valid. Falling back to new + outdated projects.")
+                    selected_projects = new_projects + outdated_projects
+            else:
+                print("No cached selection found. Falling back to new + outdated projects.")
+                selected_projects = new_projects + outdated_projects
+        else:
+            print(f"Unknown auto mode: {auto_mode}. Falling back to new + outdated projects.")
+            selected_projects = new_projects + outdated_projects
+
+        if selected_projects:
+            # Cache the selection for future use
+            project_names = [p.name for p in selected_projects]
+            self._SaveCachedSelection(cache_file, project_names)
+
+            # Show summary
+            new_count = len([p for p in selected_projects if p in new_projects])
+            outdated_count = len([p for p in selected_projects if p in outdated_projects])
+            uptodate_count = len([p for p in selected_projects if p in uptodate_projects])
+
+            print(f"Selection summary: {new_count} new, {outdated_count} outdated, {uptodate_count} up-to-date")
+
+        return selected_projects
+
+    def _CustomProjectSelection(self, all_projects, new_projects, outdated_projects, uptodate_projects):
+        """Handle custom project selection with optimized display.
+
+        Args:
+            all_projects: All available projects
+            new_projects: New projects that don't exist locally
+            outdated_projects: Projects that need updating
+            uptodate_projects: Projects that are up-to-date
+
+        Returns:
+            List of selected projects
+        """
+        print("\nCustom Project Selection")
+        print("=" * 40)
+
+        # Show categorized list
+        categories = [
+            ("New Projects", new_projects),
+            ("Outdated Projects", outdated_projects),
+            ("Up-to-date Projects", uptodate_projects)
+        ]
+
+        project_map = {}
+        counter = 1
+
+        for category_name, projects in categories:
+            if projects:
+                print(f"\n{category_name} ({len(projects)}):")
+                for project in projects:
+                    print(f"  {counter:3d}. {project.name:<30} ({project.relpath})")
+                    project_map[counter] = project
+                    counter += 1
+
+        print("\nSelection options:")
+        print("  - Enter project numbers separated by spaces (e.g., 1 3 5-8 10)")
+        print("  - Use ranges with dashes (e.g., 1-5 means projects 1,2,3,4,5)")
+        print("  - Enter 'new' for all new projects")
+        print("  - Enter 'outdated' for all outdated projects")
+        print("  - Enter 'all' to select all projects")
+        print("  - Enter 'none' to skip sync")
+        print()
+
+        while True:
+            try:
+                selection = input("Your selection: ").strip()
+
+                if not selection:
+                    print("Please make a selection.")
+                    continue
+                elif selection.lower() == "all":
+                    return all_projects
+                elif selection.lower() == "none":
+                    return []
+                elif selection.lower() == "new":
+                    return new_projects
+                elif selection.lower() == "outdated":
+                    return outdated_projects
+
+                # Parse numeric selection
+                selected_indices = self._ParseProjectSelection(selection, len(project_map))
+
+                if not selected_indices:
+                    print("Invalid selection. Please try again.")
+                    continue
+
+                selected_projects = [project_map[i] for i in selected_indices if i in project_map]
+
+                if selected_projects:
+                    print(f"\nSelected {len(selected_projects)} project(s):")
+                    for project in selected_projects[:10]:  # Show first 10
+                        print(f"  - {project.name} ({project.relpath})")
+                    if len(selected_projects) > 10:
+                        print(f"  ... and {len(selected_projects) - 10} more")
+
+                    confirm = input("\nConfirm selection? [Y/n]: ").strip().lower()
+                    if confirm in ['', 'y', 'yes']:
+                        return selected_projects
+                    else:
+                        print("Please make your selection again.\n")
+                        continue
+                else:
+                    print("No valid projects selected. Please try again.")
+                    continue
+
+            except KeyboardInterrupt:
+                print("\n\nSync cancelled by user.")
+                return []
+            except EOFError:
+                print("\n\nSync cancelled.")
+                return []
 
     def _Fetch(self, projects, opt, err_event, ssh_proxy, errors):
         ret = True
@@ -1957,6 +2359,12 @@ later is required to fix a server side protocol bug.
             manifest=manifest,
             all_manifests=not opt.this_manifest_only,
         )
+
+        # Interactive project selection when overlay mode is enabled
+        if opt.use_overlay:
+            # Set auto mode if specified
+            self._overlay_auto_mode = getattr(opt, 'overlay_auto', None)
+            all_projects = self._InteractiveProjectSelection(all_projects)
 
         # Log the repo projects by existing and new.
         existing = [x for x in all_projects if x.Exists]
